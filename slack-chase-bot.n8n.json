@@ -1,0 +1,212 @@
+{
+  "name": "Slack 未リアクション追撃Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/5 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule",
+      "name": "Schedule (5min)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://slack.com/api/conversations.history",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "channel", "value": "={{ $env.CHANNEL_ID }}" },
+            { "name": "limit", "value": "20" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "history",
+      "name": "conversations.history",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "credentials": {
+        "httpHeaderAuth": { "id": "slack-bot-token", "name": "Slack Bot Token Header" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const TRIGGER = $env.TRIGGER_EMOJI || 'mega';\nconst DONE = $env.DONE_EMOJI || 'done';\nconst res = $input.first().json;\nconst messages = res.messages || [];\nconst out = [];\nfor (const msg of messages) {\n  const reactions = msg.reactions || [];\n  const hasTrigger = reactions.some(r => r.name === TRIGGER && (r.users || []).includes(msg.user));\n  const hasDone = reactions.some(r => r.name === DONE);\n  if (hasTrigger && !hasDone) {\n    out.push({ json: msg });\n  }\n}\nreturn out;"
+      },
+      "id": "filter",
+      "name": "Filter target messages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://slack.com/api/reactions.get",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "channel", "value": "={{ $env.CHANNEL_ID }}" },
+            { "name": "timestamp", "value": "={{ $json.ts }}" },
+            { "name": "full", "value": "true" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "reactionsget",
+      "name": "reactions.get",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300],
+      "credentials": {
+        "httpHeaderAuth": { "id": "slack-bot-token", "name": "Slack Bot Token Header" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge message + reactions; extract usergroup IDs from text\nconst msg = $('Filter target messages').item.json;\nconst reactionsRes = $input.first().json;\nconst text = msg.text || '';\nconst re = /<!subteam\\^(S[A-Z0-9]+)/g;\nconst groupIds = [];\nlet m;\nwhile ((m = re.exec(text)) !== null) groupIds.push(m[1]);\nreturn groupIds.map(id => ({\n  json: {\n    usergroupId: id,\n    messageTs: msg.ts,\n    poster: msg.user,\n    reactions: (reactionsRes.message && reactionsRes.message.reactions) || []\n  }\n}));"
+      },
+      "id": "extract",
+      "name": "Extract usergroups",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://slack.com/api/usergroups.users.list",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "usergroup", "value": "={{ $json.usergroupId }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ugusers",
+      "name": "usergroups.users.list",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300],
+      "credentials": {
+        "httpHeaderAuth": { "id": "slack-bot-token", "name": "Slack Bot Token Header" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate usergroup members per message, compute diff\nconst CONFIRM = $env.CONFIRM_EMOJI || 'white_check_mark';\nconst BOT_EXCLUDE = ($env.BOT_EXCLUDE_USERS || '').split(',').map(s => s.trim()).filter(Boolean);\nconst items = $input.all();\nconst byMsg = {};\nfor (const it of items) {\n  const prev = $('Extract usergroups').itemMatching(items.indexOf(it)).json;\n  const users = (it.json.users) || [];\n  const key = prev.messageTs;\n  if (!byMsg[key]) byMsg[key] = { messageTs: key, poster: prev.poster, reactions: prev.reactions, members: new Set() };\n  for (const u of users) byMsg[key].members.add(u);\n}\nconst out = [];\nfor (const k of Object.keys(byMsg)) {\n  const b = byMsg[k];\n  const reacted = (b.reactions || []).filter(r => r.name === CONFIRM).flatMap(r => r.users || []);\n  const notReacted = [...b.members]\n    .filter(u => !reacted.includes(u))\n    .filter(u => u !== b.poster)\n    .filter(u => !BOT_EXCLUDE.includes(u));\n  if (notReacted.length === 0) {\n    out.push({ json: { done: true, messageTs: b.messageTs } });\n  } else {\n    out.push({ json: { done: false, messageTs: b.messageTs, count: notReacted.length, mentions: notReacted.map(u => `<@${u}>`).join(' ') } });\n  }\n}\nreturn out;"
+      },
+      "id": "diff",
+      "name": "Compute not-reacted",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict" },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.done }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if",
+      "name": "IF done?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"channel\": \"{{ $env.CHANNEL_ID }}\",\n  \"thread_ts\": \"{{ $json.messageTs }}\",\n  \"text\": \"📌 まだ確認リアクション（✅）がついていません。確認お願いします！\\n{{ $json.mentions }}\"\n}",
+        "options": {}
+      },
+      "id": "remind",
+      "name": "chat.postMessage (remind)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2020, 400],
+      "credentials": {
+        "httpHeaderAuth": { "id": "slack-bot-token", "name": "Slack Bot Token Header" }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/reactions.add",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json; charset=utf-8" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"channel\": \"{{ $env.CHANNEL_ID }}\",\n  \"timestamp\": \"{{ $json.messageTs }}\",\n  \"name\": \"{{ $env.DONE_EMOJI }}\"\n}",
+        "options": {}
+      },
+      "id": "markdone",
+      "name": "reactions.add (done)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2020, 200],
+      "credentials": {
+        "httpHeaderAuth": { "id": "slack-bot-token", "name": "Slack Bot Token Header" }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule (5min)": { "main": [[{ "node": "conversations.history", "type": "main", "index": 0 }]] },
+    "conversations.history": { "main": [[{ "node": "Filter target messages", "type": "main", "index": 0 }]] },
+    "Filter target messages": { "main": [[{ "node": "reactions.get", "type": "main", "index": 0 }]] },
+    "reactions.get": { "main": [[{ "node": "Extract usergroups", "type": "main", "index": 0 }]] },
+    "Extract usergroups": { "main": [[{ "node": "usergroups.users.list", "type": "main", "index": 0 }]] },
+    "usergroups.users.list": { "main": [[{ "node": "Compute not-reacted", "type": "main", "index": 0 }]] },
+    "Compute not-reacted": { "main": [[{ "node": "IF done?", "type": "main", "index": 0 }]] },
+    "IF done?": {
+      "main": [
+        [{ "node": "reactions.add (done)", "type": "main", "index": 0 }],
+        [{ "node": "chat.postMessage (remind)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" }
+}
