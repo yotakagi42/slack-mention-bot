@@ -1,3 +1,4 @@
+import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { WebClient } from "@slack/web-api";
 
 export const config = { maxDuration: 60 };
@@ -16,8 +17,6 @@ const excludeUsers = new Set(
   BOT_EXCLUDE_USERS.split(",").map((s) => s.trim()).filter(Boolean),
 );
 
-const slack = new WebClient(SLACK_BOT_TOKEN);
-
 function extractUsergroupIds(text: string): string[] {
   const ids = new Set<string>();
   const re = /<!subteam\^(S[A-Z0-9]+)/g;
@@ -26,12 +25,18 @@ function extractUsergroupIds(text: string): string[] {
   return [...ids];
 }
 
-async function processMessage(msg: {
+type SlackReaction = { name: string; users: string[] };
+type SlackMessage = {
   ts: string;
   user: string;
   text: string;
-  reactions?: { name: string; users: string[] }[];
-}): Promise<string> {
+  reactions?: SlackReaction[];
+};
+
+async function processMessage(
+  slack: WebClient,
+  msg: SlackMessage,
+): Promise<string> {
   const reactions = msg.reactions ?? [];
   const hasTrigger = reactions.some(
     (r) => r.name === TRIGGER_EMOJI && r.users.includes(msg.user),
@@ -42,15 +47,13 @@ async function processMessage(msg: {
   const groupIds = extractUsergroupIds(msg.text ?? "");
   if (groupIds.length === 0) return "no-usergroup";
 
-  // Fresh reactions (conversations.history may be stale)
   const fresh = await slack.reactions.get({
     channel: CHANNEL_ID,
     timestamp: msg.ts,
     full: true,
   });
   const freshReactions =
-    (fresh.message as { reactions?: { name: string; users: string[] }[] })
-      ?.reactions ?? [];
+    (fresh.message as { reactions?: SlackReaction[] })?.reactions ?? [];
   if (freshReactions.some((r) => r.name === DONE_EMOJI)) return "done-already";
 
   const confirmedUsers = new Set(
@@ -59,7 +62,6 @@ async function processMessage(msg: {
       .flatMap((r) => r.users),
   );
 
-  // Merge all usergroup members
   const members = new Set<string>();
   for (const gid of groupIds) {
     const res = await slack.usergroups.users.list({ usergroup: gid });
@@ -88,18 +90,24 @@ async function processMessage(msg: {
   return `chased:${notReacted.length}`;
 }
 
-export default async function handler(req: Request): Promise<Response> {
-  // Cron auth: Vercel sends Authorization: Bearer $CRON_SECRET
+export default async function handler(
+  req: VercelRequest,
+  res: VercelResponse,
+) {
   if (CRON_SECRET) {
-    const auth = req.headers.get("authorization");
+    const auth = req.headers["authorization"];
     if (auth !== `Bearer ${CRON_SECRET}`) {
-      return new Response("Unauthorized", { status: 401 });
+      return res.status(401).send("Unauthorized");
     }
   }
 
   if (!SLACK_BOT_TOKEN || !CHANNEL_ID) {
-    return Response.json({ error: "missing env" }, { status: 500 });
+    return res
+      .status(500)
+      .json({ error: "missing env", need: ["SLACK_BOT_TOKEN", "CHANNEL_ID"] });
   }
+
+  const slack = new WebClient(SLACK_BOT_TOKEN);
 
   const history = await slack.conversations.history({
     channel: CHANNEL_ID,
@@ -110,9 +118,7 @@ export default async function handler(req: Request): Promise<Response> {
   for (const m of history.messages ?? []) {
     if (!m.ts || !m.user) continue;
     try {
-      const status = await processMessage(
-        m as Parameters<typeof processMessage>[0],
-      );
+      const status = await processMessage(slack, m as SlackMessage);
       results.push({ ts: m.ts, status });
     } catch (e) {
       results.push({
@@ -123,5 +129,5 @@ export default async function handler(req: Request): Promise<Response> {
     }
   }
 
-  return Response.json({ ok: true, processed: results.length, results });
+  return res.status(200).json({ ok: true, processed: results.length, results });
 }
