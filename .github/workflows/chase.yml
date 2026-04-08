@@ -1,0 +1,17 @@
+name: Slack Chase Bot Cron
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  chase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Call chase endpoint
+        run: |
+          curl -sS -f \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.CHASE_URL }}"
