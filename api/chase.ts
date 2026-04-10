@@ -161,14 +161,12 @@ export default async function handler(
     botUserId = auth.user_id ?? null;
   } catch { /* fallback: skip duplicate check */ }
 
-  const oldest72h = ((Date.now() - 72 * 60 * 60 * 1000) / 1000).toString();
   const allResults: { channel: string; ts: string; status: string; error?: string }[] = [];
 
   for (const channelId of channelIds) {
     const history = await slack.conversations.history({
       channel: channelId,
       limit: 50,
-      oldest: oldest72h,
     });
 
     for (const m of history.messages ?? []) {
