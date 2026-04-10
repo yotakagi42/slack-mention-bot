@@ -33,9 +33,29 @@ type SlackMessage = {
   reactions?: SlackReaction[];
 };
 
+function getElapsedHours(msgTs: string): number {
+  return (Date.now() - parseFloat(msgTs) * 1000) / (1000 * 60 * 60);
+}
+
+function getChaseInterval(elapsedH: number): number {
+  if (elapsedH < 24) return 1;
+  if (elapsedH < 48) return 4;
+  return 24;
+}
+
+function getChaseText(elapsedH: number, confirmed: number, total: number): string {
+  const progress = `（確認済み: ${confirmed}/${total}人）`;
+  if (elapsedH < 24)
+    return `📌 まだ確認リアクション（:${CONFIRM_EMOJI}:）がついていません。確認お願いします！${progress}`;
+  if (elapsedH < 48)
+    return `⚠️ 【2日目】まだ未確認です。確認をお願いします！${progress}`;
+  return `🚨 【3日目以上】長期未確認です。至急ご対応をお願いします。${progress}`;
+}
+
 async function processMessage(
   slack: WebClient,
   msg: SlackMessage,
+  botUserId: string | null,
 ): Promise<string> {
   const reactions = msg.reactions ?? [];
   const hasTrigger = reactions.some(
@@ -56,6 +76,25 @@ async function processMessage(
     (fresh.message as { reactions?: SlackReaction[] })?.reactions ?? [];
   if (freshReactions.some((r) => r.name === DONE_EMOJI)) return "done-already";
 
+  // Check chase interval using thread replies
+  const elapsedH = getElapsedHours(msg.ts);
+  const intervalH = getChaseInterval(elapsedH);
+
+  if (botUserId) {
+    const replies = await slack.conversations.replies({
+      channel: CHANNEL_ID,
+      ts: msg.ts,
+      limit: 100,
+    });
+    const botReplies = (replies.messages ?? [])
+      .filter((r) => r.user === botUserId && r.ts !== msg.ts);
+    if (botReplies.length > 0) {
+      const lastBotReply = botReplies[botReplies.length - 1];
+      const hoursSinceLastChase = getElapsedHours(lastBotReply.ts!);
+      if (hoursSinceLastChase < intervalH) return "interval-skip";
+    }
+  }
+
   const confirmedUsers = new Set(
     freshReactions
       .filter((r) => r.name === CONFIRM_EMOJI)
@@ -68,9 +107,11 @@ async function processMessage(
     for (const u of res.users ?? []) members.add(u);
   }
 
-  const notReacted = [...members].filter(
-    (u) => u !== msg.user && !confirmedUsers.has(u) && !excludeUsers.has(u),
+  const targetMembers = [...members].filter(
+    (u) => u !== msg.user && !excludeUsers.has(u),
   );
+  const notReacted = targetMembers.filter((u) => !confirmedUsers.has(u));
+  const confirmed = targetMembers.length - notReacted.length;
 
   if (notReacted.length === 0) {
     await slack.reactions.add({
@@ -82,10 +123,11 @@ async function processMessage(
   }
 
   const mentions = notReacted.map((u) => `<@${u}>`).join(" ");
+  const text = getChaseText(elapsedH, confirmed, targetMembers.length);
   await slack.chat.postMessage({
     channel: CHANNEL_ID,
     thread_ts: msg.ts,
-    text: `📌 まだ確認リアクション（:${CONFIRM_EMOJI}:）がついていません。確認お願いします！\n${mentions}`,
+    text: `${text}\n${mentions}`,
   });
   return `chased:${notReacted.length}`;
 }
@@ -109,16 +151,24 @@ export default async function handler(
 
   const slack = new WebClient(SLACK_BOT_TOKEN);
 
+  let botUserId: string | null = null;
+  try {
+    const auth = await slack.auth.test();
+    botUserId = auth.user_id ?? null;
+  } catch { /* fallback: skip duplicate check */ }
+
+  const oldest72h = ((Date.now() - 72 * 60 * 60 * 1000) / 1000).toString();
   const history = await slack.conversations.history({
     channel: CHANNEL_ID,
-    limit: 20,
+    limit: 50,
+    oldest: oldest72h,
   });
 
   const results: { ts: string; status: string; error?: string }[] = [];
   for (const m of history.messages ?? []) {
     if (!m.ts || !m.user) continue;
     try {
-      const status = await processMessage(slack, m as SlackMessage);
+      const status = await processMessage(slack, m as SlackMessage, botUserId);
       results.push({ ts: m.ts, status });
     } catch (e) {
       results.push({
