@@ -5,13 +5,16 @@ export const config = { maxDuration: 60 };
 
 const {
   SLACK_BOT_TOKEN = "",
-  CHANNEL_ID = "",
+  CHANNEL_IDS = "",
   TRIGGER_EMOJI = "mega",
   CONFIRM_EMOJI = "white_check_mark",
   DONE_EMOJI = "done",
   BOT_EXCLUDE_USERS = "",
   CRON_SECRET = "",
+  ADMIN_USER_ID = "",
 } = process.env;
+
+const channelIds = CHANNEL_IDS.split(",").map((s) => s.trim()).filter(Boolean);
 
 const excludeUsers = new Set(
   BOT_EXCLUDE_USERS.split(",").map((s) => s.trim()).filter(Boolean),
@@ -54,6 +57,7 @@ function getChaseText(elapsedH: number, confirmed: number, total: number): strin
 
 async function processMessage(
   slack: WebClient,
+  channelId: string,
   msg: SlackMessage,
   botUserId: string | null,
 ): Promise<string> {
@@ -68,7 +72,7 @@ async function processMessage(
   if (groupIds.length === 0) return "no-usergroup";
 
   const fresh = await slack.reactions.get({
-    channel: CHANNEL_ID,
+    channel: channelId,
     timestamp: msg.ts,
     full: true,
   });
@@ -82,7 +86,7 @@ async function processMessage(
 
   if (botUserId) {
     const replies = await slack.conversations.replies({
-      channel: CHANNEL_ID,
+      channel: channelId,
       ts: msg.ts,
       limit: 100,
     });
@@ -115,7 +119,7 @@ async function processMessage(
 
   if (notReacted.length === 0) {
     await slack.reactions.add({
-      channel: CHANNEL_ID,
+      channel: channelId,
       timestamp: msg.ts,
       name: DONE_EMOJI,
     });
@@ -125,7 +129,7 @@ async function processMessage(
   const mentions = notReacted.map((u) => `<@${u}>`).join(" ");
   const text = getChaseText(elapsedH, confirmed, targetMembers.length);
   await slack.chat.postMessage({
-    channel: CHANNEL_ID,
+    channel: channelId,
     thread_ts: msg.ts,
     text: `${text}\n${mentions}`,
   });
@@ -143,10 +147,10 @@ export default async function handler(
     }
   }
 
-  if (!SLACK_BOT_TOKEN || !CHANNEL_ID) {
+  if (!SLACK_BOT_TOKEN || channelIds.length === 0) {
     return res
       .status(500)
-      .json({ error: "missing env", need: ["SLACK_BOT_TOKEN", "CHANNEL_ID"] });
+      .json({ error: "missing env", need: ["SLACK_BOT_TOKEN", "CHANNEL_IDS"] });
   }
 
   const slack = new WebClient(SLACK_BOT_TOKEN);
@@ -158,26 +162,41 @@ export default async function handler(
   } catch { /* fallback: skip duplicate check */ }
 
   const oldest72h = ((Date.now() - 72 * 60 * 60 * 1000) / 1000).toString();
-  const history = await slack.conversations.history({
-    channel: CHANNEL_ID,
-    limit: 50,
-    oldest: oldest72h,
-  });
+  const allResults: { channel: string; ts: string; status: string; error?: string }[] = [];
 
-  const results: { ts: string; status: string; error?: string }[] = [];
-  for (const m of history.messages ?? []) {
-    if (!m.ts || !m.user) continue;
-    try {
-      const status = await processMessage(slack, m as SlackMessage, botUserId);
-      results.push({ ts: m.ts, status });
-    } catch (e) {
-      results.push({
-        ts: m.ts,
-        status: "error",
-        error: (e as Error).message,
-      });
+  for (const channelId of channelIds) {
+    const history = await slack.conversations.history({
+      channel: channelId,
+      limit: 50,
+      oldest: oldest72h,
+    });
+
+    for (const m of history.messages ?? []) {
+      if (!m.ts || !m.user) continue;
+      try {
+        const status = await processMessage(slack, channelId, m as SlackMessage, botUserId);
+        allResults.push({ channel: channelId, ts: m.ts, status });
+      } catch (e) {
+        allResults.push({
+          channel: channelId,
+          ts: m.ts,
+          status: "error",
+          error: (e as Error).message,
+        });
+      }
     }
   }
 
-  return res.status(200).json({ ok: true, processed: results.length, results });
+  const errors = allResults.filter((r) => r.status === "error");
+  if (errors.length > 0 && ADMIN_USER_ID) {
+    const summary = errors
+      .map((e) => `• ch:\`${e.channel}\` ts:\`${e.ts}\` — ${e.error}`)
+      .join("\n");
+    await slack.chat.postMessage({
+      channel: ADMIN_USER_ID,
+      text: `⚠️ chase-bot エラー (${errors.length}件)\n${summary}`,
+    }).catch(() => {});
+  }
+
+  return res.status(200).json({ ok: true, processed: allResults.length, results: allResults });
 }
