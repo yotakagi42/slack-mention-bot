@@ -10,11 +10,14 @@ const {
   CONFIRM_EMOJI = "white_check_mark",
   DONE_EMOJI = "done",
   BOT_EXCLUDE_USERS = "",
+  BOT_EXCLUDE_GROUPS = "",
   CRON_SECRET = "",
   ADMIN_USER_ID = "",
 } = process.env;
 
 const channelIds = CHANNEL_IDS.split(",").map((s) => s.trim()).filter(Boolean);
+
+const excludeGroupIds = BOT_EXCLUDE_GROUPS.split(",").map((s) => s.trim()).filter(Boolean);
 
 const excludeUsers = new Set(
   BOT_EXCLUDE_USERS.split(",").map((s) => s.trim()).filter(Boolean),
@@ -40,19 +43,17 @@ function getElapsedHours(msgTs: string): number {
   return (Date.now() - parseFloat(msgTs) * 1000) / (1000 * 60 * 60);
 }
 
-function getChaseInterval(elapsedH: number): number {
-  if (elapsedH < 24) return 1;
-  if (elapsedH < 48) return 4;
-  return 24;
+function getChaseInterval(_elapsedH: number): number {
+  return 4;
 }
 
 function getChaseText(elapsedH: number, confirmed: number, total: number): string {
   const progress = `（確認済み: ${confirmed}/${total}人）`;
-  if (elapsedH < 24)
+  if (elapsedH < 72)
     return `📌 まだ確認リアクション（:${CONFIRM_EMOJI}:）がついていません。確認お願いします！${progress}`;
-  if (elapsedH < 48)
-    return `⚠️ 【2日目】まだ未確認です。確認をお願いします！${progress}`;
-  return `🚨 【3日目以上】長期未確認です。至急ご対応をお願いします。${progress}`;
+  if (elapsedH < 96)
+    return `⚠️ 【3日目】まだ未確認です。確認をお願いします！${progress}`;
+  return `🚨 【5日目以上】長期未確認です。至急ご対応をお願いします。${progress}`;
 }
 
 async function processMessage(
@@ -111,8 +112,14 @@ async function processMessage(
     for (const u of res.users ?? []) members.add(u);
   }
 
+  const excludeGroupMembers = new Set<string>();
+  for (const gid of excludeGroupIds) {
+    const res = await slack.usergroups.users.list({ usergroup: gid });
+    for (const u of res.users ?? []) excludeGroupMembers.add(u);
+  }
+
   const targetMembers = [...members].filter(
-    (u) => u !== msg.user && !excludeUsers.has(u),
+    (u) => u !== msg.user && !excludeUsers.has(u) && !excludeGroupMembers.has(u),
   );
   const notReacted = targetMembers.filter((u) => !confirmedUsers.has(u));
   const confirmed = targetMembers.length - notReacted.length;
