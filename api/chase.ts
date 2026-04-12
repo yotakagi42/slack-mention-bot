@@ -81,26 +81,36 @@ async function processMessage(
     (fresh.message as { reactions?: SlackReaction[] })?.reactions ?? [];
   if (freshReactions.some((r) => r.name === DONE_EMOJI)) return "done-already";
 
-  // Skip messages less than 48 hours old
-  const elapsedH = getElapsedHours(msg.ts);
-  if (elapsedH < 48) return "too-early";
+  // Get thread replies to check tracking state
+  const replies = await slack.conversations.replies({
+    channel: channelId,
+    ts: msg.ts,
+    limit: 100,
+  });
+  const botReplies = botUserId
+    ? (replies.messages ?? []).filter((r) => r.user === botUserId && r.ts !== msg.ts)
+    : [];
 
-  const intervalH = getChaseInterval(elapsedH);
-
-  if (botUserId) {
-    const replies = await slack.conversations.replies({
+  // First detection: post tracking start message
+  if (botReplies.length === 0) {
+    await slack.chat.postMessage({
       channel: channelId,
-      ts: msg.ts,
-      limit: 100,
+      thread_ts: msg.ts,
+      text: `👀 追跡を開始しました。48時間後から未確認メンバーに催促を送信します。`,
     });
-    const botReplies = (replies.messages ?? [])
-      .filter((r) => r.user === botUserId && r.ts !== msg.ts);
-    if (botReplies.length > 0) {
-      const lastBotReply = botReplies[botReplies.length - 1];
-      const hoursSinceLastChase = getElapsedHours(lastBotReply.ts!);
-      if (hoursSinceLastChase < intervalH) return "interval-skip";
-    }
+    return "tracking-started";
   }
+
+  // Check if 48h passed since first bot reply (= tracking start)
+  const firstBotReply = botReplies[0];
+  const hoursSinceTracking = getElapsedHours(firstBotReply.ts!);
+  if (hoursSinceTracking < 48) return "too-early";
+
+  // Check chase interval against last bot reply
+  const intervalH = getChaseInterval(hoursSinceTracking);
+  const lastBotReply = botReplies[botReplies.length - 1];
+  const hoursSinceLastChase = getElapsedHours(lastBotReply.ts!);
+  if (hoursSinceLastChase < intervalH) return "interval-skip";
 
   const confirmedUsers = new Set(
     freshReactions
@@ -136,7 +146,7 @@ async function processMessage(
   }
 
   const mentions = notReacted.map((u) => `<@${u}>`).join(" ");
-  const text = getChaseText(elapsedH, confirmed, targetMembers.length);
+  const text = getChaseText(hoursSinceTracking, confirmed, targetMembers.length);
   await slack.chat.postMessage({
     channel: channelId,
     thread_ts: msg.ts,
