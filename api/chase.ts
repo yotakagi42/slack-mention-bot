@@ -52,7 +52,7 @@ function getChaseText(elapsedH: number, confirmed: number, total: number): strin
   if (elapsedH < 72)
     return `📌 まだ確認リアクション（:${CONFIRM_EMOJI}:）がついていません。確認お願いします！${progress}`;
   if (elapsedH < 96)
-    return `⚠️ 【3日目】まだ未確認です。確認をお願いします！${progress}`;
+    return `⚠️ 【3日目〜4日目】まだ未確認です。確認をお願いします！${progress}`;
   return `🚨 【5日目以上】長期未確認です。至急ご対応をお願いします。${progress}`;
 }
 
@@ -81,8 +81,10 @@ async function processMessage(
     (fresh.message as { reactions?: SlackReaction[] })?.reactions ?? [];
   if (freshReactions.some((r) => r.name === DONE_EMOJI)) return "done-already";
 
-  // Check chase interval using thread replies
+  // Skip messages less than 48 hours old
   const elapsedH = getElapsedHours(msg.ts);
+  if (elapsedH < 48) return "too-early";
+
   const intervalH = getChaseInterval(elapsedH);
 
   if (botUserId) {
