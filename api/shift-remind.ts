@@ -29,11 +29,15 @@ type SlackMessage = {
 };
 type SheetGrid = string[][];
 
-function parseMemberMap(): MemberMap {
+function parseMemberMap(): { map: MemberMap; error: string | null } {
   try {
-    return JSON.parse(SHIFT_MEMBER_MAP) as MemberMap;
-  } catch {
-    return {};
+    const parsed = JSON.parse(SHIFT_MEMBER_MAP);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { map: {}, error: "SHIFT_MEMBER_MAP must be a JSON object" };
+    }
+    return { map: parsed as MemberMap, error: null };
+  } catch (e) {
+    return { map: {}, error: `SHIFT_MEMBER_MAP parse failed: ${(e as Error).message}` };
   }
 }
 
@@ -88,7 +92,8 @@ async function fetchSheetTab(
     return (res.data.values ?? []) as SheetGrid;
   } catch (e: any) {
     const status = e?.response?.status ?? e?.code;
-    if (status === 400) return null;
+    const msg = String(e?.response?.data?.error?.message ?? e?.message ?? "");
+    if (status === 400 && msg.includes("Unable to parse range")) return null;
     throw e;
   }
 }
@@ -147,8 +152,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const slack = new WebClient(SLACK_BOT_TOKEN);
-  const memberMap = parseMemberMap();
+  const { map: memberMap, error: memberMapError } = parseMemberMap();
   const errors: string[] = [];
+  if (memberMapError) {
+    errors.push(memberMapError);
+  }
 
   let sheets: SheetsClient;
   try {
@@ -182,6 +190,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       await slack.chat.postMessage({ channel: ADMIN_USER_ID, text: `⚠️ ${msg}` }).catch(() => {});
     }
     return res.status(200).json({ ok: false, error: msg });
+  }
+
+  if (!todayGrid) {
+    // Current-month tab missing — try previous-month tab as a graceful fallback
+    try {
+      const fallback = await fetchSheetTab(sheets, yesterdayTabName);
+      if (fallback) {
+        const warn = `shift-remind: today tab ${todayTabName} missing, using fallback ${yesterdayTabName}`;
+        if (ADMIN_USER_ID) {
+          await slack.chat.postMessage({ channel: ADMIN_USER_ID, text: `⚠️ ${warn}` }).catch(() => {});
+        }
+        todayGrid = fallback;
+        yesterdayGrid = fallback;
+      }
+    } catch (e) {
+      errors.push(`fallback fetch ${yesterdayTabName}: ${(e as Error).message}`);
+    }
   }
 
   if (!todayGrid || !yesterdayGrid) {
