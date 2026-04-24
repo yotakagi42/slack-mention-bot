@@ -45,6 +45,26 @@ function extractUserMentions(text: string): string[] {
   return [...ids];
 }
 
+function getJstNow(): Date {
+  return new Date(Date.now() + 9 * 60 * 60 * 1000);
+}
+
+function addDays(d: Date, delta: number): Date {
+  const copy = new Date(d);
+  copy.setUTCDate(copy.getUTCDate() + delta);
+  return copy;
+}
+
+function formatYYMM(d: Date): string {
+  const yy = String(d.getUTCFullYear()).slice(-2);
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${yy}/${mm}`;
+}
+
+function formatMD(d: Date): string {
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (CRON_SECRET) {
     const authHeader = req.headers["authorization"];
