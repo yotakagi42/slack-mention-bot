@@ -54,21 +54,6 @@ SPECS = [
         shadow=(79, 17, 27, 110),
         icon_kind="sun",
     ),
-    EmojiSpec(
-        filename="kyuake-zumi.png",
-        top_text="休明",
-        bottom_text="済",
-        badge_top=(93, 188, 116),
-        badge_bottom=(38, 134, 86),
-        panel=(18, 90, 59, 84),
-        panel_strong=(17, 82, 54, 122),
-        text_fill=(245, 255, 246, 255),
-        text_stroke=(20, 86, 58, 255),
-        icon_fill=(226, 247, 227, 255),
-        icon_glow=(239, 255, 244, 120),
-        shadow=(15, 64, 45, 104),
-        icon_kind="check",
-    ),
 ]
 
 
