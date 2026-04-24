@@ -61,6 +61,7 @@ async function processMessage(
   channelId: string,
   msg: SlackMessage,
   botUserId: string | null,
+  botBotId: string | null,
 ): Promise<string> {
   const reactions = msg.reactions ?? [];
   const hasTrigger = reactions.some(
@@ -80,37 +81,6 @@ async function processMessage(
   const freshReactions =
     (fresh.message as { reactions?: SlackReaction[] })?.reactions ?? [];
   if (freshReactions.some((r) => r.name === DONE_EMOJI)) return "done-already";
-
-  // Get thread replies to check tracking state
-  const replies = await slack.conversations.replies({
-    channel: channelId,
-    ts: msg.ts,
-    limit: 100,
-  });
-  const botReplies = botUserId
-    ? (replies.messages ?? []).filter((r) => r.user === botUserId && r.ts !== msg.ts)
-    : [];
-
-  // First detection: post tracking start message
-  if (botReplies.length === 0) {
-    await slack.chat.postMessage({
-      channel: channelId,
-      thread_ts: msg.ts,
-      text: `👀 追跡を開始しました。48時間後から未確認メンバーに催促を送信します。`,
-    });
-    return "tracking-started";
-  }
-
-  // Check if 48h passed since first bot reply (= tracking start)
-  const firstBotReply = botReplies[0];
-  const hoursSinceTracking = getElapsedHours(firstBotReply.ts!);
-  if (hoursSinceTracking < 48) return "too-early";
-
-  // Check chase interval against last bot reply
-  const intervalH = getChaseInterval(hoursSinceTracking);
-  const lastBotReply = botReplies[botReplies.length - 1];
-  const hoursSinceLastChase = getElapsedHours(lastBotReply.ts!);
-  if (hoursSinceLastChase < intervalH) return "interval-skip";
 
   const confirmedUsers = new Set(
     freshReactions
@@ -136,17 +106,47 @@ async function processMessage(
   const notReacted = targetMembers.filter((u) => !confirmedUsers.has(u));
   const confirmed = targetMembers.length - notReacted.length;
 
+  // All confirmed → add done emoji (regardless of 48h)
   if (notReacted.length === 0) {
-    await slack.reactions.add({
-      channel: channelId,
-      timestamp: msg.ts,
-      name: DONE_EMOJI,
-    });
+    try {
+      await slack.reactions.add({
+        channel: channelId,
+        timestamp: msg.ts,
+        name: DONE_EMOJI,
+      });
+    } catch (e: any) {
+      if (e?.data?.error !== "already_reacted") throw e;
+    }
     return "marked-done";
   }
 
+  // Chase messages only after 48h
+  const hoursSinceMessage = getElapsedHours(msg.ts);
+  if (hoursSinceMessage < 48) return "too-early";
+
+  // Get thread replies to check chase interval
+  const replies = await slack.conversations.replies({
+    channel: channelId,
+    ts: msg.ts,
+    limit: 100,
+  });
+  const botReplies = (replies.messages ?? []).filter((r) => {
+    if (r.ts === msg.ts) return false;
+    if (botUserId && r.user === botUserId) return true;
+    if (botBotId && r.bot_id === botBotId) return true;
+    return false;
+  });
+
+  // Check chase interval against last bot reply
+  if (botReplies.length > 0) {
+    const intervalH = getChaseInterval(hoursSinceMessage);
+    const lastBotReply = botReplies[botReplies.length - 1];
+    const hoursSinceLastChase = getElapsedHours(lastBotReply.ts!);
+    if (hoursSinceLastChase < intervalH) return "interval-skip";
+  }
+
   const mentions = notReacted.map((u) => `<@${u}>`).join(" ");
-  const text = getChaseText(hoursSinceTracking, confirmed, targetMembers.length);
+  const text = getChaseText(hoursSinceMessage, confirmed, targetMembers.length);
   await slack.chat.postMessage({
     channel: channelId,
     thread_ts: msg.ts,
@@ -175,9 +175,11 @@ export default async function handler(
   const slack = new WebClient(SLACK_BOT_TOKEN);
 
   let botUserId: string | null = null;
+  let botBotId: string | null = null;
   try {
     const auth = await slack.auth.test();
     botUserId = auth.user_id ?? null;
+    botBotId = auth.bot_id ?? null;
   } catch { /* fallback: skip duplicate check */ }
 
   const allResults: { channel: string; ts: string; status: string; error?: string }[] = [];
@@ -191,7 +193,7 @@ export default async function handler(
     for (const m of history.messages ?? []) {
       if (!m.ts || !m.user) continue;
       try {
-        const status = await processMessage(slack, channelId, m as SlackMessage, botUserId);
+        const status = await processMessage(slack, channelId, m as SlackMessage, botUserId, botBotId);
         allResults.push({ channel: channelId, ts: m.ts, status });
       } catch (e) {
         allResults.push({
