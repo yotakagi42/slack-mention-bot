@@ -37,6 +37,14 @@ function parseMemberMap(): MemberMap {
   }
 }
 
+function extractUserMentions(text: string): string[] {
+  const ids = new Set<string>();
+  const re = /<@(U[A-Z0-9]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) ids.add(m[1]);
+  return [...ids];
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (CRON_SECRET) {
     const authHeader = req.headers["authorization"];
