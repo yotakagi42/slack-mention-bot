@@ -93,6 +93,44 @@ async function fetchSheetTab(
   }
 }
 
+function findColumnByHeader(grid: SheetGrid, headerName: string): number {
+  const header = grid[0] ?? [];
+  return header.findIndex((h) => (h ?? "").toString().trim() === headerName);
+}
+
+function findRowIndexByDate(grid: SheetGrid, targetMD: string): number {
+  for (let i = 1; i < grid.length; i++) {
+    const cell = (grid[i]?.[0] ?? "").toString().trim();
+    if (cell === targetMD) return i;
+  }
+  return -1;
+}
+
+type ReturnVerdict = "yes" | "no" | "column-not-found";
+
+function isReturningToday(
+  todayGrid: SheetGrid,
+  yesterdayGrid: SheetGrid,
+  columnName: string,
+  todayMD: string,
+  yesterdayMD: string,
+): ReturnVerdict {
+  const todayCol = findColumnByHeader(todayGrid, columnName);
+  const yesterdayCol = findColumnByHeader(yesterdayGrid, columnName);
+  if (todayCol === -1 || yesterdayCol === -1) return "column-not-found";
+
+  const todayRow = findRowIndexByDate(todayGrid, todayMD);
+  const yesterdayRow = findRowIndexByDate(yesterdayGrid, yesterdayMD);
+  if (todayRow === -1 || yesterdayRow === -1) return "no";
+
+  const todayStatus = (todayGrid[todayRow]?.[todayCol] ?? "").toString().trim();
+  const yesterdayStatus = (yesterdayGrid[yesterdayRow]?.[yesterdayCol] ?? "").toString().trim();
+
+  const isOffYesterday = yesterdayStatus === "×";
+  const isOnToday = todayStatus === "O" || todayStatus === "";
+  return isOffYesterday && isOnToday ? "yes" : "no";
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (CRON_SECRET) {
     const authHeader = req.headers["authorization"];
