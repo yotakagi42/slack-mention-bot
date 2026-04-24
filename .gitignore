@@ -6,3 +6,6 @@ node_modules
 .DS_Store
 *.log
 .omc
+shift-bot-sa.json
+*-sa.json
+users.json
