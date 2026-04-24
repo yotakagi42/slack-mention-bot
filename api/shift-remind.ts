@@ -65,6 +65,34 @@ function formatMD(d: Date): string {
   return `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
 }
 
+type SheetsClient = ReturnType<typeof google.sheets>;
+
+async function createSheetsClient(): Promise<SheetsClient> {
+  const creds = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
+  const auth = new google.auth.GoogleAuth({
+    credentials: creds,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+  });
+  return google.sheets({ version: "v4", auth });
+}
+
+async function fetchSheetTab(
+  sheets: SheetsClient,
+  tabName: string,
+): Promise<SheetGrid | null> {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHIFT_SHEET_ID,
+      range: `'${tabName}'!A1:ZZ50`,
+    });
+    return (res.data.values ?? []) as SheetGrid;
+  } catch (e: any) {
+    const status = e?.response?.status ?? e?.code;
+    if (status === 400) return null;
+    throw e;
+  }
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (CRON_SECRET) {
     const authHeader = req.headers["authorization"];
