@@ -1,6 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/chase.ts": { "maxDuration": 60 }
+    "api/chase.ts": { "maxDuration": 60 },
+    "api/shift-remind.ts": { "maxDuration": 60 }
   }
 }
