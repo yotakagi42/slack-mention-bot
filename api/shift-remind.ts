@@ -146,6 +146,150 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  // TODO: implementation will be added in subsequent tasks
-  return res.status(200).json({ ok: true, processed: 0, results: [] });
+  const slack = new WebClient(SLACK_BOT_TOKEN);
+  const memberMap = parseMemberMap();
+  const errors: string[] = [];
+
+  let sheets: SheetsClient;
+  try {
+    sheets = await createSheetsClient();
+  } catch (e) {
+    const msg = `shift-remind: Sheets auth failed — ${(e as Error).message}`;
+    if (ADMIN_USER_ID) {
+      await slack.chat.postMessage({ channel: ADMIN_USER_ID, text: `⚠️ ${msg}` }).catch(() => {});
+    }
+    return res.status(200).json({ ok: false, error: msg });
+  }
+
+  const jstNow = getJstNow();
+  const jstYesterday = addDays(jstNow, -1);
+  const todayTabName = formatYYMM(jstNow);
+  const yesterdayTabName = formatYYMM(jstYesterday);
+  const todayMD = formatMD(jstNow);
+  const yesterdayMD = formatMD(jstYesterday);
+
+  let todayGrid: SheetGrid | null;
+  let yesterdayGrid: SheetGrid | null;
+  try {
+    todayGrid = await fetchSheetTab(sheets, todayTabName);
+    yesterdayGrid =
+      todayTabName === yesterdayTabName
+        ? todayGrid
+        : await fetchSheetTab(sheets, yesterdayTabName);
+  } catch (e) {
+    const msg = `shift-remind: Sheets fetch failed — ${(e as Error).message}`;
+    if (ADMIN_USER_ID) {
+      await slack.chat.postMessage({ channel: ADMIN_USER_ID, text: `⚠️ ${msg}` }).catch(() => {});
+    }
+    return res.status(200).json({ ok: false, error: msg });
+  }
+
+  if (!todayGrid || !yesterdayGrid) {
+    const msg = `shift-remind: tab not found (today=${todayTabName}, yesterday=${yesterdayTabName})`;
+    if (ADMIN_USER_ID) {
+      await slack.chat.postMessage({ channel: ADMIN_USER_ID, text: `⚠️ ${msg}` }).catch(() => {});
+    }
+    return res.status(200).json({ ok: false, error: msg });
+  }
+
+  const lookbackDays = Number(SHIFT_LOOKBACK_DAYS) || 14;
+  const results: { channel: string; ts: string; status: string; error?: string }[] = [];
+
+  for (const channelId of channelIds) {
+    const oldest = String(Math.floor(Date.now() / 1000 - lookbackDays * 86400));
+    let history;
+    try {
+      history = await slack.conversations.history({
+        channel: channelId,
+        oldest,
+        limit: 200,
+      });
+    } catch (e) {
+      errors.push(`history(${channelId}): ${(e as Error).message}`);
+      continue;
+    }
+
+    for (const msg of (history.messages ?? []) as SlackMessage[]) {
+      if (!msg.ts) continue;
+      const reactions = msg.reactions ?? [];
+      const hasTrigger = reactions.some((r) => r.name === SHIFT_REMIND_EMOJI);
+      const hasDone = reactions.some((r) => r.name === SHIFT_DONE_EMOJI);
+      if (!hasTrigger) continue;
+      if (hasDone) {
+        results.push({ channel: channelId, ts: msg.ts, status: "done-already" });
+        continue;
+      }
+      const mentions = extractUserMentions(msg.text ?? "");
+      if (mentions.length === 0) {
+        results.push({ channel: channelId, ts: msg.ts, status: "no-mention" });
+        continue;
+      }
+
+      try {
+        const returningToday: string[] = [];
+        const unknownColumns: string[] = [];
+        for (const uid of mentions) {
+          const columnName = memberMap[uid];
+          if (!columnName) continue;
+          const verdict = isReturningToday(
+            todayGrid,
+            yesterdayGrid,
+            columnName,
+            todayMD,
+            yesterdayMD,
+          );
+          if (verdict === "yes") returningToday.push(uid);
+          if (verdict === "column-not-found") unknownColumns.push(columnName);
+        }
+
+        if (unknownColumns.length > 0) {
+          errors.push(`column-not-found: ${unknownColumns.join(", ")}`);
+        }
+
+        if (returningToday.length === 0) {
+          results.push({ channel: channelId, ts: msg.ts, status: "not-returning-today" });
+          continue;
+        }
+
+        const mentionText = returningToday.map((u) => `<@${u}>`).join(" ");
+        await slack.chat.postMessage({
+          channel: channelId,
+          thread_ts: msg.ts,
+          text: `${mentionText} おはようございます！\nお休み中に確認依頼が届いています。ご対応お願いします 🙏`,
+        });
+        try {
+          await slack.reactions.add({
+            channel: channelId,
+            timestamp: msg.ts,
+            name: SHIFT_DONE_EMOJI,
+          });
+        } catch (e: any) {
+          if (e?.data?.error !== "already_reacted") {
+            errors.push(`reactions.add(${msg.ts}): ${e.message}`);
+          }
+        }
+        results.push({
+          channel: channelId,
+          ts: msg.ts,
+          status: `reminded:${returningToday.length}`,
+        });
+      } catch (e) {
+        results.push({
+          channel: channelId,
+          ts: msg.ts,
+          status: "error",
+          error: (e as Error).message,
+        });
+      }
+    }
+  }
+
+  if (errors.length > 0 && ADMIN_USER_ID) {
+    await slack.chat.postMessage({
+      channel: ADMIN_USER_ID,
+      text: `⚠️ shift-remind エラー (${errors.length}件)\n${errors.map((e) => `• ${e}`).join("\n")}`,
+    }).catch(() => {});
+  }
+
+  return res.status(200).json({ ok: true, processed: results.length, results });
 }
