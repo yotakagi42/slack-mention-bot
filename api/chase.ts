@@ -106,6 +106,10 @@ async function processMessage(
   const notReacted = targetMembers.filter((u) => !confirmedUsers.has(u));
   const confirmed = targetMembers.length - notReacted.length;
 
+  // Empty target set (poster-only group, all members excluded, etc.) — bail without
+  // marking done so the misleading green tick isn't applied without anyone being chased.
+  if (targetMembers.length === 0) return "no-targets";
+
   // All confirmed → add done emoji (regardless of 48h)
   if (notReacted.length === 0) {
     try {
@@ -180,7 +184,20 @@ export default async function handler(
     const auth = await slack.auth.test();
     botUserId = auth.user_id ?? null;
     botBotId = auth.bot_id ?? null;
-  } catch { /* fallback: skip duplicate check */ }
+  } catch (e) {
+    const msg = `chase-bot: auth.test failed — ${(e as Error).message}. Skipping run to avoid duplicate chase messages.`;
+    if (ADMIN_USER_ID) {
+      await slack.chat.postMessage({ channel: ADMIN_USER_ID, text: `⚠️ ${msg}` }).catch(() => {});
+    }
+    return res.status(200).json({ ok: false, error: msg });
+  }
+  if (!botUserId && !botBotId) {
+    const msg = `chase-bot: auth.test returned no bot identity. Skipping run.`;
+    if (ADMIN_USER_ID) {
+      await slack.chat.postMessage({ channel: ADMIN_USER_ID, text: `⚠️ ${msg}` }).catch(() => {});
+    }
+    return res.status(200).json({ ok: false, error: msg });
+  }
 
   const allResults: { channel: string; ts: string; status: string; error?: string }[] = [];
 
