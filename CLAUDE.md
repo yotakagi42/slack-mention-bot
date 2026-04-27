@@ -5,8 +5,13 @@ Vercel Serverless Function + cron-job.org で動作するSlack未確認メッセ
 `:kakunin_yoro:` リアクションをトリガーに、48時間後から未確認メンバーに自動催促を送信する。
 
 ## コード構成
-- `api/chase.ts` — Bot本体（約210行、単一ファイル）
-- `vercel.json` — Vercel設定
+- `api/chase.ts` — 追客本体（`:kakunin_yoro:` 48h追客）
+- `api/shift-remind.ts` — 休み明けリマインド本体（`:kyuake_yoro:` トリガー、毎朝9:00 JST）
+- `vercel.json` — Vercel設定（両エンドポイント `maxDuration: 60`）
+- `scripts/list-users.ts` — Slack ワークスペース member 一覧取得（`SHIFT_MEMBER_MAP` 作成用）
+- `scripts/gen-emoji.py` — `kyuake-yoro.png` 生成（Pillow）
+- `docs/superpowers/specs/2026-04-24-shift-remind-design.md` — 設計仕様
+- `docs/superpowers/plans/2026-04-24-shift-remind.md` — 実装計画
 - `slack-chase-bot.n8n.json` — 旧n8nワークフロー（廃止済み、参考用）
 
 ## 開発フロー
@@ -30,13 +35,32 @@ vercel --prod
 ```
 
 ## 現在の環境変数
-- `SLACK_BOT_TOKEN` / `CHANNEL_IDS` / `TRIGGER_EMOJI` (kakunin_yoro)
-- `CONFIRM_EMOJI` (kakunin_zumi) / `DONE_EMOJI` (zennin_kakunin)
-- `ADMIN_USER_ID` / `CRON_SECRET` / `BOT_EXCLUDE_USERS` / `BOT_EXCLUDE_GROUPS`
 
-## 最終仕様（2026-04-12確定）
-- 48時間後から催促開始（Bot初検出時刻基準、最大4hズレ）
+### 共通
+- `SLACK_BOT_TOKEN` / `CHANNEL_IDS` / `CRON_SECRET` / `ADMIN_USER_ID`
+
+### chase（追客）
+- `TRIGGER_EMOJI` (kakunin_yoro) / `CONFIRM_EMOJI` (kakunin_zumi) / `DONE_EMOJI` (zennin_kakunin)
+- `BOT_EXCLUDE_USERS` / `BOT_EXCLUDE_GROUPS`
+
+### shift-remind（休み明けリマインド）
+- `SHIFT_REMIND_EMOJI` (kyuake_yoro) / `SHIFT_DONE_EMOJI` (white_check_mark)
+- `SHIFT_SHEET_ID` — シフト表のGoogle Spreadsheet ID
+- `SHIFT_MEMBER_MAP` — `{ slack_user_id: sheet_column_name }` のJSON
+- `GOOGLE_SERVICE_ACCOUNT_JSON` — Google Sheets API用 Service Account credentials
+- `SHIFT_LOOKBACK_DAYS` (14) — 何日前までのメッセージを走査するか
+
+## chase仕様（2026-04-12確定 / 2026-04-27 timing redesign）
+- 48時間後から催促開始（**メッセージ投稿時刻 `msg.ts` 基準**）
 - 4時間ごとにチェック・催促
 - エスカレーション: 48-72h 通常 / 72-96h 警告 / 96h+ 緊急
 - CEOグループ除外 / マルチチャンネル / エラーDM通知
 - 要件定義者: 成田彩香さん（U0AJVQWFRGW）
+
+## shift-remind仕様（2026-04-24確定）
+- 依頼者がメンション付きメッセージに `:kyuake_yoro:` を付与
+- 毎朝9:00 JST に cron が起動、Google Sheets で「昨日=×／今日=O or 空」の人を検出
+- 該当者がいれば元スレッドに @mention 付きでリマインド投稿
+- per-user dedup: 既にbotがメンションしたuidはスキップ（複数日復帰のメッセージにも対応）
+- 全mapped mentionが処理済みになった時のみ `:white_check_mark:` を親メッセージに付与
+- 依頼者: 堀江昂汰さん（U0ADVCK5ALT）
