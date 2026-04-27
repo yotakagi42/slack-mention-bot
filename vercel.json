@@ -3,5 +3,8 @@
   "functions": {
     "api/chase.ts": { "maxDuration": 60 },
     "api/shift-remind.ts": { "maxDuration": 60 }
-  }
+  },
+  "crons": [
+    { "path": "/api/shift-remind", "schedule": "0 0 * * *" }
+  ]
 }
