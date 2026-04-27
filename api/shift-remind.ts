@@ -139,6 +139,136 @@ function isReturningToday(
   return isOffYesterday && isOnToday ? "yes" : "no";
 }
 
+async function processTriggerMessage(opts: {
+  slack: WebClient;
+  channelId: string;
+  triggerMsg: SlackMessage;
+  threadRootTs: string;
+  isThreadReply: boolean;
+  memberMap: MemberMap;
+  todayGrid: SheetGrid;
+  yesterdayGrid: SheetGrid;
+  todayMD: string;
+  yesterdayMD: string;
+  botUserId: string | null;
+  botBotId: string | null;
+  results: { channel: string; ts: string; status: string; error?: string }[];
+  errors: string[];
+}): Promise<void> {
+  const {
+    slack, channelId, triggerMsg, threadRootTs, isThreadReply,
+    memberMap, todayGrid, yesterdayGrid, todayMD, yesterdayMD,
+    botUserId, botBotId, results, errors,
+  } = opts;
+
+  const suffix = isThreadReply ? "(thread)" : "";
+
+  const reactions = triggerMsg.reactions ?? [];
+  const hasTrigger = reactions.some((r) => r.name === SHIFT_REMIND_EMOJI);
+  const hasDone = reactions.some((r) => r.name === SHIFT_DONE_EMOJI);
+  if (!hasTrigger) return;
+  if (hasDone) {
+    results.push({ channel: channelId, ts: triggerMsg.ts, status: `done-already${suffix}` });
+    return;
+  }
+  const mentions = extractUserMentions(triggerMsg.text ?? "");
+  if (mentions.length === 0) {
+    results.push({ channel: channelId, ts: triggerMsg.ts, status: `no-mention${suffix}` });
+    return;
+  }
+
+  let alreadyReminded = new Set<string>();
+  try {
+    const replies = await slack.conversations.replies({
+      channel: channelId,
+      ts: threadRootTs,
+      limit: 100,
+    });
+    const botReplies = (replies.messages ?? []).filter((r) => {
+      if (r.ts === threadRootTs) return false;
+      if (botUserId && r.user === botUserId) return true;
+      if (botBotId && r.bot_id === botBotId) return true;
+      return false;
+    });
+    for (const reply of botReplies) {
+      for (const uid of extractUserMentions(reply.text ?? "")) {
+        alreadyReminded.add(uid);
+      }
+    }
+  } catch (e) {
+    errors.push(`replies(${channelId}, ${threadRootTs}): ${(e as Error).message}`);
+  }
+
+  try {
+    const returningToday: string[] = [];
+    const unknownColumns: string[] = [];
+    const missingRows: string[] = [];
+    for (const uid of mentions) {
+      if (alreadyReminded.has(uid)) continue;
+      const columnName = memberMap[uid];
+      if (!columnName) continue;
+      const verdict = isReturningToday(
+        todayGrid,
+        yesterdayGrid,
+        columnName,
+        todayMD,
+        yesterdayMD,
+      );
+      if (verdict === "yes") returningToday.push(uid);
+      if (verdict === "column-not-found") unknownColumns.push(columnName);
+      if (verdict === "row-not-found") missingRows.push(`${columnName}(${todayMD} or ${yesterdayMD})`);
+    }
+
+    if (unknownColumns.length > 0) {
+      errors.push(`column-not-found: ${unknownColumns.join(", ")}`);
+    }
+    if (missingRows.length > 0) {
+      errors.push(`row-not-found: ${missingRows.join(", ")}`);
+    }
+
+    if (returningToday.length === 0) {
+      results.push({ channel: channelId, ts: triggerMsg.ts, status: `not-returning-today${suffix}` });
+      return;
+    }
+
+    const mentionText = returningToday.map((u) => `<@${u}>`).join(" ");
+    await slack.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadRootTs,
+      text: `${mentionText} おはようございます！\nお休み中に確認依頼が届いています。ご対応お願いします 🙏`,
+    });
+    // After posting the reminder, augment alreadyReminded with this run's set.
+    for (const uid of returningToday) alreadyReminded.add(uid);
+    const mappedMentions = mentions.filter((u) => memberMap[u]);
+    const fullyDrained = mappedMentions.every((u) => alreadyReminded.has(u));
+    if (fullyDrained) {
+      try {
+        await slack.reactions.add({
+          channel: channelId,
+          timestamp: triggerMsg.ts,
+          name: SHIFT_DONE_EMOJI,
+        });
+      } catch (e: any) {
+        if (e?.data?.error !== "already_reacted") {
+          errors.push(`reactions.add(${triggerMsg.ts}): ${e.message}`);
+        }
+      }
+    }
+    results.push({
+      channel: channelId,
+      ts: triggerMsg.ts,
+      status: `reminded:${returningToday.length}${suffix}`,
+    });
+  } catch (e) {
+    results.push({
+      channel: channelId,
+      ts: triggerMsg.ts,
+      status: "error",
+      error: (e as Error).message,
+    });
+  }
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (CRON_SECRET) {
     const authHeader = req.headers["authorization"];
@@ -259,111 +389,46 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       continue;
     }
 
-    for (const msg of (history.messages ?? []) as SlackMessage[]) {
-      if (!msg.ts) continue;
-      const reactions = msg.reactions ?? [];
-      const hasTrigger = reactions.some((r) => r.name === SHIFT_REMIND_EMOJI);
-      const hasDone = reactions.some((r) => r.name === SHIFT_DONE_EMOJI);
-      if (!hasTrigger) continue;
-      if (hasDone) {
-        results.push({ channel: channelId, ts: msg.ts, status: "done-already" });
-        continue;
-      }
-      const mentions = extractUserMentions(msg.text ?? "");
-      if (mentions.length === 0) {
-        results.push({ channel: channelId, ts: msg.ts, status: "no-mention" });
-        continue;
-      }
+    for (const parentMsg of (history.messages ?? []) as SlackMessage[]) {
+      if (!parentMsg.ts) continue;
 
-      let alreadyReminded = new Set<string>();
-      try {
-        const replies = await slack.conversations.replies({
-          channel: channelId,
-          ts: msg.ts,
-          limit: 100,
-        });
-        const botReplies = (replies.messages ?? []).filter((r) => {
-          if (r.ts === msg.ts) return false;
-          if (botUserId && r.user === botUserId) return true;
-          if (botBotId && r.bot_id === botBotId) return true;
-          return false;
-        });
-        for (const reply of botReplies) {
-          for (const uid of extractUserMentions(reply.text ?? "")) {
-            alreadyReminded.add(uid);
-          }
-        }
-      } catch (e) {
-        errors.push(`replies(${channelId}, ${msg.ts}): ${(e as Error).message}`);
-      }
+      // Process top-level message
+      await processTriggerMessage({
+        slack, channelId,
+        triggerMsg: parentMsg,
+        threadRootTs: parentMsg.ts,
+        isThreadReply: false,
+        memberMap, todayGrid, yesterdayGrid, todayMD, yesterdayMD,
+        botUserId, botBotId, results, errors,
+      });
 
-      try {
-        const returningToday: string[] = [];
-        const unknownColumns: string[] = [];
-        const missingRows: string[] = [];
-        for (const uid of mentions) {
-          if (alreadyReminded.has(uid)) continue;
-          const columnName = memberMap[uid];
-          if (!columnName) continue;
-          const verdict = isReturningToday(
-            todayGrid,
-            yesterdayGrid,
-            columnName,
-            todayMD,
-            yesterdayMD,
-          );
-          if (verdict === "yes") returningToday.push(uid);
-          if (verdict === "column-not-found") unknownColumns.push(columnName);
-          if (verdict === "row-not-found") missingRows.push(`${columnName}(${todayMD} or ${yesterdayMD})`);
-        }
-
-        if (unknownColumns.length > 0) {
-          errors.push(`column-not-found: ${unknownColumns.join(", ")}`);
-        }
-        if (missingRows.length > 0) {
-          errors.push(`row-not-found: ${missingRows.join(", ")}`);
-        }
-
-        if (returningToday.length === 0) {
-          results.push({ channel: channelId, ts: msg.ts, status: "not-returning-today" });
+      // Process thread replies if any
+      const replyCount = (parentMsg as any).reply_count ?? 0;
+      if (replyCount > 0) {
+        let repliesRes;
+        try {
+          repliesRes = await slack.conversations.replies({
+            channel: channelId,
+            ts: parentMsg.ts,
+            limit: 100,
+          });
+        } catch (e) {
+          errors.push(`replies-scan(${channelId}, ${parentMsg.ts}): ${(e as Error).message}`);
           continue;
         }
-
-        const mentionText = returningToday.map((u) => `<@${u}>`).join(" ");
-        await slack.chat.postMessage({
-          channel: channelId,
-          thread_ts: msg.ts,
-          text: `${mentionText} おはようございます！\nお休み中に確認依頼が届いています。ご対応お願いします 🙏`,
-        });
-        // After posting the reminder, augment alreadyReminded with this run's set.
-        for (const uid of returningToday) alreadyReminded.add(uid);
-        const mappedMentions = mentions.filter((u) => memberMap[u]);
-        const fullyDrained = mappedMentions.every((u) => alreadyReminded.has(u));
-        if (fullyDrained) {
-          try {
-            await slack.reactions.add({
-              channel: channelId,
-              timestamp: msg.ts,
-              name: SHIFT_DONE_EMOJI,
-            });
-          } catch (e: any) {
-            if (e?.data?.error !== "already_reacted") {
-              errors.push(`reactions.add(${msg.ts}): ${e.message}`);
-            }
-          }
+        const allReplies = (repliesRes.messages ?? []) as SlackMessage[];
+        // Skip the parent itself (always at index 0 when ts matches the root)
+        for (const reply of allReplies) {
+          if (!reply.ts || reply.ts === parentMsg.ts) continue;
+          await processTriggerMessage({
+            slack, channelId,
+            triggerMsg: reply,
+            threadRootTs: parentMsg.ts,
+            isThreadReply: true,
+            memberMap, todayGrid, yesterdayGrid, todayMD, yesterdayMD,
+            botUserId, botBotId, results, errors,
+          });
         }
-        results.push({
-          channel: channelId,
-          ts: msg.ts,
-          status: `reminded:${returningToday.length}`,
-        });
-      } catch (e) {
-        results.push({
-          channel: channelId,
-          ts: msg.ts,
-          status: "error",
-          error: (e as Error).message,
-        });
       }
     }
   }
