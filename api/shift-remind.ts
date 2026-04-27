@@ -35,6 +35,9 @@ function parseMemberMap(): { map: MemberMap; error: string | null } {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return { map: {}, error: "SHIFT_MEMBER_MAP must be a JSON object" };
     }
+    if (Object.keys(parsed).length === 0) {
+      return { map: {}, error: "SHIFT_MEMBER_MAP is empty — no users will receive reminders" };
+    }
     return { map: parsed as MemberMap, error: null };
   } catch (e) {
     return { map: {}, error: `SHIFT_MEMBER_MAP parse failed: ${(e as Error).message}` };
@@ -111,7 +114,7 @@ function findRowIndexByDate(grid: SheetGrid, targetMD: string): number {
   return -1;
 }
 
-type ReturnVerdict = "yes" | "no" | "column-not-found";
+type ReturnVerdict = "yes" | "no" | "column-not-found" | "row-not-found";
 
 function isReturningToday(
   todayGrid: SheetGrid,
@@ -126,7 +129,7 @@ function isReturningToday(
 
   const todayRow = findRowIndexByDate(todayGrid, todayMD);
   const yesterdayRow = findRowIndexByDate(yesterdayGrid, yesterdayMD);
-  if (todayRow === -1 || yesterdayRow === -1) return "no";
+  if (todayRow === -1 || yesterdayRow === -1) return "row-not-found";
 
   const todayStatus = (todayGrid[todayRow]?.[todayCol] ?? "").toString().trim();
   const yesterdayStatus = (yesterdayGrid[yesterdayRow]?.[yesterdayCol] ?? "").toString().trim();
@@ -152,6 +155,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const slack = new WebClient(SLACK_BOT_TOKEN);
+
+  let botUserId: string | null = null;
+  let botBotId: string | null = null;
+  try {
+    const auth = await slack.auth.test();
+    botUserId = auth.user_id ?? null;
+    botBotId = auth.bot_id ?? null;
+  } catch (e) {
+    const msg = `shift-remind: auth.test failed — ${(e as Error).message}`;
+    if (ADMIN_USER_ID) {
+      await slack.chat.postMessage({ channel: ADMIN_USER_ID, text: `⚠️ ${msg}` }).catch(() => {});
+    }
+    return res.status(200).json({ ok: false, error: msg });
+  }
+  if (!botUserId && !botBotId) {
+    const msg = `shift-remind: auth.test returned no bot identity. Skipping run.`;
+    if (ADMIN_USER_ID) {
+      await slack.chat.postMessage({ channel: ADMIN_USER_ID, text: `⚠️ ${msg}` }).catch(() => {});
+    }
+    return res.status(200).json({ ok: false, error: msg });
+  }
+
   const { map: memberMap, error: memberMapError } = parseMemberMap();
   const errors: string[] = [];
   if (memberMapError) {
@@ -250,10 +275,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         continue;
       }
 
+      let alreadyReminded = new Set<string>();
+      try {
+        const replies = await slack.conversations.replies({
+          channel: channelId,
+          ts: msg.ts,
+          limit: 100,
+        });
+        const botReplies = (replies.messages ?? []).filter((r) => {
+          if (r.ts === msg.ts) return false;
+          if (botUserId && r.user === botUserId) return true;
+          if (botBotId && r.bot_id === botBotId) return true;
+          return false;
+        });
+        for (const reply of botReplies) {
+          for (const uid of extractUserMentions(reply.text ?? "")) {
+            alreadyReminded.add(uid);
+          }
+        }
+      } catch (e) {
+        errors.push(`replies(${channelId}, ${msg.ts}): ${(e as Error).message}`);
+      }
+
       try {
         const returningToday: string[] = [];
         const unknownColumns: string[] = [];
+        const missingRows: string[] = [];
         for (const uid of mentions) {
+          if (alreadyReminded.has(uid)) continue;
           const columnName = memberMap[uid];
           if (!columnName) continue;
           const verdict = isReturningToday(
@@ -265,10 +314,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           );
           if (verdict === "yes") returningToday.push(uid);
           if (verdict === "column-not-found") unknownColumns.push(columnName);
+          if (verdict === "row-not-found") missingRows.push(`${columnName}(${todayMD} or ${yesterdayMD})`);
         }
 
         if (unknownColumns.length > 0) {
           errors.push(`column-not-found: ${unknownColumns.join(", ")}`);
+        }
+        if (missingRows.length > 0) {
+          errors.push(`row-not-found: ${missingRows.join(", ")}`);
         }
 
         if (returningToday.length === 0) {
@@ -282,15 +335,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           thread_ts: msg.ts,
           text: `${mentionText} おはようございます！\nお休み中に確認依頼が届いています。ご対応お願いします 🙏`,
         });
-        try {
-          await slack.reactions.add({
-            channel: channelId,
-            timestamp: msg.ts,
-            name: SHIFT_DONE_EMOJI,
-          });
-        } catch (e: any) {
-          if (e?.data?.error !== "already_reacted") {
-            errors.push(`reactions.add(${msg.ts}): ${e.message}`);
+        // After posting the reminder, augment alreadyReminded with this run's set.
+        for (const uid of returningToday) alreadyReminded.add(uid);
+        const mappedMentions = mentions.filter((u) => memberMap[u]);
+        const fullyDrained = mappedMentions.every((u) => alreadyReminded.has(u));
+        if (fullyDrained) {
+          try {
+            await slack.reactions.add({
+              channel: channelId,
+              timestamp: msg.ts,
+              name: SHIFT_DONE_EMOJI,
+            });
+          } catch (e: any) {
+            if (e?.data?.error !== "already_reacted") {
+              errors.push(`reactions.add(${msg.ts}): ${e.message}`);
+            }
           }
         }
         results.push({
