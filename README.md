@@ -19,6 +19,7 @@ https://api.slack.com/apps → Create New App → From scratch
 
 **Bot Token Scopes** (OAuth & Permissions):
 - `channels:history` (publicチャンネル) / `groups:history` (privateチャンネル)
+- `channels:read` (`CHASE_AUTO_CHANNELS` でチャンネル自動検出を使う場合のみ)
 - `reactions:read`
 - `reactions:write`
 - `usergroups:read`

@@ -37,9 +37,11 @@ vercel --prod
 ## 現在の環境変数
 
 ### 共通
-- `SLACK_BOT_TOKEN` / `CHANNEL_IDS` / `CRON_SECRET` / `ADMIN_USER_ID`
+- `SLACK_BOT_TOKEN` / `CRON_SECRET` / `ADMIN_USER_ID`
+- `CHANNEL_IDS` — 監視対象チャンネルID（カンマ区切り）。**shift-remind と共有。空にすると shift-remind が停止する**
 
 ### chase（追客）
+- `CHASE_AUTO_CHANNELS` — `1` または `true` でBot参加チャンネルの自動検出を有効化。未設定なら `CHANNEL_IDS` を使う従来動作
 - `TRIGGER_EMOJI` (kakunin_yoro) / `CONFIRM_EMOJI` (kakunin_zumi) / `DONE_EMOJI` (zennin_kakunin)
 - `BOT_EXCLUDE_USERS` / `BOT_EXCLUDE_GROUPS`
 
@@ -54,6 +56,8 @@ vercel --prod
 - 48時間後から催促開始（**メッセージ投稿時刻 `msg.ts` 基準**）
 - 4時間ごとにチェック・催促
 - エスカレーション: 48-72h 通常 / 72-96h 警告 / 96h+ 緊急
+- 走査対象は既定で `CHANNEL_IDS`。`CHASE_AUTO_CHANNELS=1` でBot参加チャンネルの自動検出に切り替わる（要 `channels:read`。private のみなら既存スコープで動く）
+- 走査範囲は直近10日・1チャンネルあたり200件。45秒で打ち切り、開始位置を実行ごとにローテーションする
 - CEOグループ除外 / マルチチャンネル / エラーDM通知
 - 要件定義者: 成田彩香さん（U0AJVQWFRGW）
 

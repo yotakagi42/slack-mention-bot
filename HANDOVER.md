@@ -65,9 +65,12 @@ https://api.slack.com/apps の当該Appを開き、Settings > Collaborators に�
 Bot Tokenはワークスペースに紐付くので、Appの持ち主が変わってもトークンは有効なまま。ただし完全に手を離すなら OAuth & Permissions で Regenerate して新トークンをVercelに入れ直すのが安全。
 
 必要なBot Token Scopes（変更しないこと）:
-`channels:history` `groups:history` `reactions:read` `reactions:write` `usergroups:read` `chat:write`
+現在付いているもの:
+`channels:history` `groups:history` `groups:read` `reactions:read` `reactions:write` `usergroups:read` `chat:write` `users:read`
 
-Botは対象チャンネル全部に `/invite` されている必要がある。
+チャンネル自動検出（7章）を使うなら `channels:read` を追加する。
+
+Botは監視対象チャンネル全部に `/invite` されている必要がある。
 
 ### 2-5. Google Service Account
 
@@ -75,7 +78,7 @@ shift-remind がシフト表を読むのに使っている（`GOOGLE_SERVICE_ACC
 
 権限は `spreadsheets.readonly` だけあればいい。
 
-## 3. 環境変数一覧（15個）
+## 3. 環境変数一覧（16個）
 
 値はリポジトリに入っていない。移管時に高木から受け取るか、Vercelの管理画面からコピーする。
 
@@ -84,7 +87,7 @@ shift-remind がシフト表を読むのに使っている（`GOOGLE_SERVICE_ACC
 | 変数 | 内容 |
 |---|---|
 | `SLACK_BOT_TOKEN` | `xoxb-` で始まるBot Token |
-| `CHANNEL_IDS` | 監視対象チャンネルID。カンマ区切りで複数可 |
+| `CHANNEL_IDS` | 監視対象チャンネルID。カンマ区切りで複数可。**chase と shift-remind の両方が使う。空にすると shift-remind が500で停止する** |
 | `CRON_SECRET` | 外部からエンドポイントを叩かれないための共有シークレット |
 | `ADMIN_USER_ID` | 障害時にDMが飛ぶ先。現在は高木。**引き継ぎ先のIDに必ず変更する** |
 
@@ -92,6 +95,7 @@ shift-remind がシフト表を読むのに使っている（`GOOGLE_SERVICE_ACC
 
 | 変数 | 現在の値 | 内容 |
 |---|---|---|
+| `CHASE_AUTO_CHANNELS` | 未設定 | `1` か `true` でチャンネル自動検出を有効化。7章参照 |
 | `TRIGGER_EMOJI` | `kakunin_yoro` | 監視を開始する絵文字。投稿者本人が付ける必要がある |
 | `CONFIRM_EMOJI` | `kakunin_zumi` | メンバーが確認済みを示す絵文字 |
 | `DONE_EMOJI` | `zennin_kakunin` | 全員完了時にBotが付ける絵文字 |
@@ -133,6 +137,8 @@ SlackユーザーIDの一覧は `npx tsx scripts/list-users.ts` で取れる。
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
+| 新しいチャンネルで反応しない | `CHANNEL_IDS` に登録していない | 7章の手順で追加する |
+| 5日以上前の投稿が追われない | 走査範囲が直近10日・200件まで | 仕様。長期放置分は手で対応する |
 | 催促が全く来ない | `:kakunin_yoro:` を投稿者本人以外が付けた | 投稿者本人が付け直す。仕様で本人のリアクションしか見ていない |
 | 催促が全く来ない | 本文にユーザーグループのメンションがない | `@グループ名` でのメンションが必須。個人メンションだけでは動かない |
 | 古い投稿が追われなくなった | chaseは各チャンネルの直近50件しか見ない | チャンネルが賑やかだと未完了のまま脱落する。仕様上の制限 |
@@ -161,6 +167,37 @@ vercel --prod      # デプロイ
 
 `slack-chase-bot.n8n.json` は廃止済みの旧n8nワークフロー。参考用に残しているだけで動いていない。
 
-## 7. 未確認事項
+## 7. 新しいチャンネルで使いたいとき
+
+### 当面の手順（設定を1回変える）
+
+`CHANNEL_IDS` にチャンネルIDを足して再デプロイする。
+
+```bash
+vercel env rm CHANNEL_IDS production --yes
+printf '%s' 'C0AJGUBLC6B,C0AKJFVUJ6M,C0AK20E971S,<新しいID>' | vercel env add CHANNEL_IDS production
+vercel --prod
+```
+
+チャンネルIDはSlackでチャンネル名をクリックした先の最下部に出る。Botの `/invite` も忘れずに。
+
+### 招待するだけで済むようにする（任意）
+
+`CHASE_AUTO_CHANNELS=1` を入れると、Botが参加しているチャンネルを毎回自動で拾うようになる。チャンネル追加のたびに設定を触る必要がなくなる。
+
+有効にする前に、Slack Appに `channels:read` を追加して再インストールする。これが無いとpublicチャンネルの一覧が取れず、Botは催促を送らずに管理者へDMして終了する（黙って壊れることはない）。
+
+```bash
+printf '%s' '1' | vercel env add CHASE_AUTO_CHANNELS production
+vercel --prod
+```
+
+有効時は `CHANNEL_IDS` の値は無視される。ただし shift-remind は `CHANNEL_IDS` を使い続けるので、**空にしてはいけない**。
+
+戻すときは `vercel env rm CHASE_AUTO_CHANNELS production --yes` して再デプロイすれば元の動作に戻る。
+
+privateチャンネルだけなら `groups:read` が既にあるので、`channels:read` を追加しなくても自動検出は動く。
+
+## 8. 未確認事項
 
 - cron-job.org の実際のジョブ設定はダッシュボードを直接見て確認していない。上記の内容は `CLAUDE.md` の記述とコードから再構成したもの。移管作業時に実物を開いて突き合わせること
