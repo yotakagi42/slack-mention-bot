@@ -144,6 +144,7 @@ SlackユーザーIDの一覧は `npx tsx scripts/list-users.ts` で取れる。
 | 古い投稿が追われなくなった | chaseは各チャンネルの直近50件しか見ない | チャンネルが賑やかだと未完了のまま脱落する。仕様上の制限 |
 | 休み明けリマインドが来ない | 当月のタブが未作成 | シフト表に `YY/MM` 形式のタブを作る |
 | 特定の人だけリマインドされない | `SHIFT_MEMBER_MAP` の名前とシフト表の見出しが不一致 | `list-shift-columns.ts` で実際の見出しを確認して直す |
+| `vercel` コマンドが `Not authorized` で失敗する | `.vercel/project.json` の組織IDが古い | `npx vercel link --project slack-mention-bot --yes` で貼り直す。projectId は変わらない |
 | Botから警告DMが届く | Slack認証失敗、シフト表の行/列が見つからない等 | DM本文にエラー内容が入っている。多くは上記のどれか |
 | 完了絵文字が付いているのに催促を再開したい | 完了絵文字が状態そのもの | 投稿から完了絵文字を手で外す |
 
